@@ -13,9 +13,10 @@ int myBPM = 0, previousBPM = 0;
 
 //LM35DZ Temperature sensor variables          
 float tempSignal = 0.f;
-int tempSignals[10];
-int tempCnt = 0;
-int tempOccurrence[10];
+int tempSignals[20]; //getting average pf 20 values
+int tempCnt = 0; 
+int tempOccurrence[20];
+int tempPower = 7; //pin 7 as temp sensor power supply
 
 //ADXL335 Accelerometer variables
 const int xpin = A1;
@@ -36,37 +37,40 @@ float zaccl[11] = {0};
 String readings("");
 
 int counter = 0;
-int updateReceived = 0; 
-int receivedData = 0;
-String recData = "";
+int updateReceived = 0; //update received from mobile app
+int receivedData = 0; //data received from mobile app
+
 void setup() {
   Serial.begin(9600);
+  pinMode(tempPower, OUTPUT);
+  digitalWrite(tempPower, HIGH); //power supply temp sensor
   // Configure the PulseSensor object, by assigning our variables to it. 
   pulseSensor.analogInput(PulseWire);   
   pulseSensor.blinkOnPulse(LED13);       //auto-magically blink Arduino's LED with heartbeat.
   pulseSensor.setThreshold(Threshold);
 
   pulseSensor.begin();
-  pulseSensor.pause();
+  pulseSensor.pause(); //pause the pulse sensor
   calibrate(); //get initial readings for adxl335
 
 }
 
 void loop() {
+  //if data available from mobile device, receive it and set as current num steps
   if(Serial.available() > 0){
     updateReceived = 1;
     receivedData = (Serial.readString()).toInt();
     Serial.println(receivedData);
     steps = receivedData;
   }
-
-
+  //do nothing until update is received
   if(updateReceived == 0)
   ;
   else {
     
-    counter++;
-    //Accelerometer
+    counter++; //loop counter 40 iterations, 20 for pulse sensor, 20 for temp sensor
+    Serial.println(counter);
+    //Read Accelerometer in every loop
     for (int a = 1; a < 11; a++){
       xaccl[a] = float(analogRead(xpin));
       delay(1);
@@ -76,8 +80,6 @@ void loop() {
       delay(1);
       totvect[a] = sqrt(((xaccl[a] - xavg) * (xaccl[a] - xavg)) + ((yaccl[a] - yavg) * (yaccl[a] - yavg)) + ((zval[a] - zavg) * (zval[a] - zavg)));
       totave[a] = (totvect[a] + totvect[a - 1]) / 2 ;
-  //    Serial.println("totave[a]");
-  //    Serial.println(totave[a]);
   
       if (totave[a] > threshold)
       {
@@ -87,52 +89,50 @@ void loop() {
       if (steps < 0) {
         steps = 0;
       }
-  //    Serial.println('\n');
-  //    Serial.print("steps: ");
-  //    Serial.println(steps);
+      
       delay(10);
     }
-    delay(100);
-      
-    if(counter == 20){
+    delay(10);
+
+    //reset loop counter at 40
+    if(counter == 40){ //count 40 loops
       counter = 0;
     }
-    if(counter < 10){
-      if(counter == 1)
+
+    //first 20 to get pulse rate
+    if(counter < 20){ 
+      if(counter == 1){
+        //turn of temp sensor power
+        digitalWrite(tempPower, LOW);
         pulseSensor.resume();
+      }
       //Pulse sensor
       myBPM = pulseSensor.getBeatsPerMinute();  // Calls function on our pulseSensor object that returns BPM as an "int".
                                                 //  "myBPM" hold this BPM value now. 
-      if (pulseSensor.sawStartOfBeat()) {            // Constantly test to see if "a beat happened". 
-  //     Serial.println("Pulse recorded."); // If test is "true", print a message "a heartbeat happened".
-  //     Serial.print("BPM: ");                        // Print phrase "BPM: " 
-  //     Serial.println(myBPM);                        // Print the value inside of myBPM. 
+      if (pulseSensor.sawStartOfBeat()) {       // Constantly test to see if "a beat happened". 
          ;
       }
-      delay(20);                    // considered best practice in a simple sketch.
+      delay(100);                    // considered best practice in a simple sketch.
       
-      if(counter == 9)
+      if(counter == 19){ //20th loop, pause pulse sensor and turn on tempsensor power
         pulseSensor.pause();
-    } else {
-      
+        digitalWrite(tempPower, HIGH);
+      }
+    } else { //next 20 to get temp
       //Temperature sensor
       tempSignal = analogRead(A7);
       tempSignal = (int)(tempSignal * 0.48828125);
-  //    Serial.print("TEMPERATURE: ");
-  //    Serial.print(tempSignal);
-  //    Serial.println(" *C");
       tempSignals[tempCnt] = (int)tempSignal;
       tempCnt++;
       
-      //send data to android
-      if(counter == 19){
-        
-        //get mode of 10 temperature readings
+      //send data to android at the last 40th loop
+      if(counter == 39){
+        //get mode of 20 temperature readings
         tempCnt = 0;
         int numTimes = 0;
-        for(int i=0; i<10; i++){
+        for(int i=0; i<20; i++){
           //get number of times each temp occurred
-          for(int j=0; j<10; j++){
+          for(int j=0; j<20; j++){
             if(tempSignals[i] == tempSignals[j])
               numTimes++;
           }
@@ -140,11 +140,11 @@ void loop() {
           numTimes = 0;
         }
         int highest = 0;
-        for(int i=0; i<10; i++){
+        for(int i=0; i<20; i++){
           if(tempOccurrence[i] > tempOccurrence[highest])
             highest = i;
         }
-        //output temperature with the highest occurrence.
+        //output temperature with the highest occurrence; Heart rate and num of steps.
         readings += tempSignals[highest];
         readings += "|";
         readings += myBPM;
@@ -157,7 +157,7 @@ void loop() {
       
     } 
    
-    delay(100);
+    delay(10);
   }
 }
 
@@ -170,7 +170,7 @@ void calibrate()
     xval[i] = float(analogRead(xpin));
     sum = xval[i] + sum;
   }
-  delay(100);
+  delay(10);
   xavg = sum / 10.0;
 //  Serial.println(xavg);
   for (int j = 0; j < 10; j++)
@@ -180,13 +180,13 @@ void calibrate()
   }
   yavg = sum1 / 10.0;
 //  Serial.println(yavg);
-  delay(100);
+  delay(10);
   for (int q = 0; q < 10; q++)
   {
     zval[q] = float(analogRead(zpin));
     sum2 = zval[q] + sum2;
   }
   zavg = sum2 / 10.0;
-  delay(100);
+  delay(10);
 //  Serial.println(zavg);
 }
