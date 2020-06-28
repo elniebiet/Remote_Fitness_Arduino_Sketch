@@ -2,6 +2,15 @@
 #define USE_ARDUINO_INTERRUPTS true    // Set-up low-level interrupts for most acurate BPM math.
 #include <PulseSensorPlayground.h>     // Includes the PulseSensorPlayground Library.   
 
+//ADXL335 defines
+#define ADX_ADC_REF_VOLT 5  //5V adc ref voltage
+#define ADX_ADC_AMPLITUDE 1024 //max amplitude 1024
+#define ADX_ADC_SENSE 0.25 //default adc sensitivity = 0.25 per g
+#define ZERO_X  1.22 //accleration of X-AXIS is 0g, the voltage of X-AXIS is 1.22v
+#define ZERO_Y  1.22 //
+#define ZERO_Z  1.25 //
+
+
 //pulse sensor variables 
 const int PulseWire = 0;       // PulseSensor PURPLE WIRE connected to ANALOG PIN 0
 const int LED13 = 13;          // The on-board Arduino LED, close to PIN 13.
@@ -22,17 +31,19 @@ int tempPower = 7; //pin 7 as temp sensor power supply
 const int xpin = A1;
 const int ypin = A2;
 const int zpin = A3;
-float threshold = 178;
-float xval[11] = {0};
-float yval[11] = {0};
-float zval[11] = {0};
-float xavg, yavg, zavg;
-long int steps = 0;
-float totvect[11] = {0};
-float totave[11] = {0};
-float xaccl[11] = {0};
-float yaccl[11] = {0};
-float zaccl[11] = {0};
+int trueSteps = 0;
+boolean presumedSteps[10] = {false};
+int presumedStepsCounter = 0;
+boolean startedWalking = false;
+boolean presumedFirstStep = false;
+boolean checkingConsistency = false;
+int consistencyCounter = 0;
+boolean consistency[10] = {false};
+float currentAcc = 0.0;
+float previousAcc = 0.0;
+float differenceThreshold = 0.4;
+int tenSteps[10] = {0};
+int16_t tenStepsCounter = 0;
 
 String readings("");
 
@@ -44,6 +55,27 @@ void setup() {
   Serial.begin(9600);
   pinMode(tempPower, OUTPUT);
   digitalWrite(tempPower, HIGH); //power supply temp sensor
+
+  //ADXL335 setup
+  pinMode(xpin, INPUT);
+  pinMode(ypin, INPUT);
+  pinMode(zpin, INPUT);
+  //get x, y, z
+  int16_t x = analogRead(xpin);
+  int16_t y = analogRead(ypin);
+  int16_t z = analogRead(zpin);
+  //get voltage values
+  float xv = (float)x / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+  float yv = (float)y / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+  float zv = (float)z / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+  //compute g values (acceleration)
+  float ax = (xv - ZERO_X)/ADX_ADC_SENSE;
+  float ay = (yv - ZERO_Y)/ADX_ADC_SENSE;
+  float az = (zv - ZERO_Z)/ADX_ADC_SENSE;
+  //compute total acceleration vector
+  currentAcc = sqrt(ax*ax + ay*ay + az*az);
+  
+  
   // Configure the PulseSensor object, by assigning our variables to it. 
   pulseSensor.analogInput(PulseWire);   
   pulseSensor.blinkOnPulse(LED13);       //auto-magically blink Arduino's LED with heartbeat.
@@ -51,7 +83,7 @@ void setup() {
 
   pulseSensor.begin();
   pulseSensor.pause(); //pause the pulse sensor
-  calibrate(); //get initial readings for adxl335
+//  calibrate(); //get initial readings for adxl335
 
 }
 
@@ -61,38 +93,111 @@ void loop() {
     updateReceived = 1;
     receivedData = (Serial.readString()).toInt();
     Serial.println(receivedData);
-    steps = receivedData;
+    trueSteps = receivedData;
   }
   //do nothing until update is received
   if(updateReceived == 0)
   ;
   else {
     
-    counter++; //loop counter 40 iterations, 20 for pulse sensor, 20 for temp sensor
-    Serial.println(counter);
+    counter++; //loop counter for only pulse sensor and temp sensor: 40 iterations => 20 for pulse sensor, 20 for temp sensor
+//    Serial.println(counter);
+    
     //Read Accelerometer in every loop
-    for (int a = 1; a < 11; a++){
-      xaccl[a] = float(analogRead(xpin));
-      delay(1);
-      yaccl[a] = float(analogRead(ypin));
-      delay(1);
-      zaccl[a] = float(analogRead(zpin));
-      delay(1);
-      totvect[a] = sqrt(((xaccl[a] - xavg) * (xaccl[a] - xavg)) + ((yaccl[a] - yavg) * (yaccl[a] - yavg)) + ((zval[a] - zavg) * (zval[a] - zavg)));
-      totave[a] = (totvect[a] + totvect[a - 1]) / 2 ;
+    //get x, y, z
+    int16_t x = analogRead(xpin);
+    int16_t y = analogRead(ypin);
+    int16_t z = analogRead(zpin);
   
-      if (totave[a] > threshold)
-      {
-        steps = steps + 1;
+    //get voltage values
+    float xv = (float)x / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+    float yv = (float)y / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+    float zv = (float)z / ADX_ADC_AMPLITUDE * ADX_ADC_REF_VOLT;
+  
+    //compute g values (acceleration)
+    float ax = (xv - ZERO_X)/ADX_ADC_SENSE;
+    float ay = (yv - ZERO_Y)/ADX_ADC_SENSE;
+    float az = (zv - ZERO_Z)/ADX_ADC_SENSE;
+  
+    //compute total acceleration vector
+    float totalAccVec = sqrt(ax*ax + ay*ay + az*az);
+    previousAcc = currentAcc;
+    currentAcc = totalAccVec;
+    float currentDiff = currentAcc - previousAcc;
+    currentDiff = sqrt(currentDiff * currentDiff); //get absolute value 
+  
+    //if yet to start walking and presumedStepsCounter is up to 10 steps
+  //  Serial.println(presumedStepsCounter);
+    if(presumedStepsCounter == 10 && startedWalking == false){
+      int realSteps = 0;
+      for(int i=0; i<10; i++){
+        realSteps += (presumedSteps[i] == true) ? 1 : 0;
+        //reset buffer
+        presumedSteps[i] = false;
+      }
+      if(realSteps > 4){ //check if there are up to 4 out of 10 that are greater than threshold
+        //walking detected
+        trueSteps += realSteps;
+        startedWalking = true;
+  //      Serial.println("-----------------------------------------WALKING DETECTED .");
+        differenceThreshold += 0.1; //increase the threshold
+      } else {
+        startedWalking = false; 
       }
   
-      if (steps < 0) {
-        steps = 0;
+      presumedStepsCounter = 0;
+    }
+  
+    if(presumedFirstStep == true && startedWalking == false){
+      presumedSteps[presumedStepsCounter] = (currentDiff > differenceThreshold) ? true : false;
+      presumedStepsCounter++;
+    }
+    
+    if((currentDiff > differenceThreshold) && (startedWalking == true) && (checkingConsistency == false)){
+      //dont just increment, check consistency in next 10 steps
+      checkingConsistency = true;
+      consistency[0] = true;
+  //    Serial.print("-----------------------------------STEPS: ");
+  //    Serial.println(trueSteps);
+    }
+  
+    //if started walking, checkingConsistency is true
+    if(checkingConsistency == true){
+      if(consistencyCounter < 9){ //if consistency counter is not up to ten, keep counting
+        consistencyCounter++;
+        consistency[consistencyCounter] = (currentDiff > differenceThreshold) ? true : false; //set which of 10 steps are consistent
       }
       
-      delay(10);
+      if(consistencyCounter == 9){ //if consistencycounter is == 9, i.e 10th step
+        //check how many steps were consistent
+        int consistentSteps = 0;
+        for(int i=0; i<10; i++){
+          consistentSteps += (consistency[i] == true) ? 1 : 0;
+          //reset consistency
+          consistency[i] = 0;
+        }
+  //      Serial.print(" ---------------------------CONSISTENT STEPS: ");
+  //      Serial.println(consistentSteps);
+        //check if to add the number of consistent steps
+        if(consistentSteps >= 3){ //there were at least 3 consistent steps
+          trueSteps += consistentSteps; //add to true steps
+        } else {
+            //not walking  
+            startedWalking = false; 
+            differenceThreshold = differenceThreshold - 0.1; //decrease threshold to detect steps again
+            presumedFirstStep = false; //wait to detect step again
+        }
+        checkingConsistency = false; //stop checking consistency
+        consistencyCounter = 0; //reset consistency counter
+      }
     }
-    delay(10);
+    
+    if(currentDiff > differenceThreshold){
+      presumedFirstStep = true;
+    }
+  
+    delay(120);    
+
 
     //reset loop counter at 40
     if(counter == 40){ //count 40 loops
@@ -149,7 +254,7 @@ void loop() {
         readings += "|";
         readings += myBPM;
         readings += "|";
-        readings += steps;
+        readings += trueSteps;
         Serial.println(readings);
         readings = "";
         
@@ -159,34 +264,4 @@ void loop() {
    
     delay(10);
   }
-}
-
-void calibrate()
-{
-  float sum = 0;
-  float sum1 = 0;
-  float sum2 = 0;
-  for (int i = 0; i < 10; i++) {
-    xval[i] = float(analogRead(xpin));
-    sum = xval[i] + sum;
-  }
-  delay(10);
-  xavg = sum / 10.0;
-//  Serial.println(xavg);
-  for (int j = 0; j < 10; j++)
-  {
-    yval[j] = float(analogRead(ypin));
-    sum1 = yval[j] + sum1;
-  }
-  yavg = sum1 / 10.0;
-//  Serial.println(yavg);
-  delay(10);
-  for (int q = 0; q < 10; q++)
-  {
-    zval[q] = float(analogRead(zpin));
-    sum2 = zval[q] + sum2;
-  }
-  zavg = sum2 / 10.0;
-  delay(10);
-//  Serial.println(zavg);
 }
