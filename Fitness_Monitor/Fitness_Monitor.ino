@@ -2,6 +2,12 @@
 #define USE_ARDUINO_INTERRUPTS true    // Set-up low-level interrupts for most acurate BPM math.
 #include <PulseSensorPlayground.h>     // Includes the PulseSensorPlayground Library.   
 
+//OLED libs
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
 //ADXL335 defines
 #define ADX_ADC_REF_VOLT 5  //5V adc ref voltage
 #define ADX_ADC_AMPLITUDE 1024 //max amplitude 1024
@@ -9,6 +15,16 @@
 #define ZERO_X  1.22 //accleration of X-AXIS is 0g, the voltage of X-AXIS is 1.22v
 #define ZERO_Y  1.22 //
 #define ZERO_Z  1.25 //
+
+//OLED defines
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#define NUMFLAKES     10 // Number of snowflakes in the animation example
+#define LOGO_HEIGHT   16
+#define LOGO_WIDTH    16
 
 
 //pulse sensor variables 
@@ -31,7 +47,7 @@ int tempPower = 7; //pin 7 as temp sensor power supply
 const int xpin = A1;
 const int ypin = A2;
 const int zpin = A3;
-int trueSteps = 0;
+long int trueSteps = 0;
 boolean presumedSteps[10] = {false};
 int presumedStepsCounter = 0;
 boolean startedWalking = false;
@@ -56,6 +72,14 @@ void setup() {
   pinMode(tempPower, OUTPUT);
   digitalWrite(tempPower, HIGH); //power supply temp sensor
 
+  //OLED 
+  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+  initDisplay(); //initialise display
+  
   //ADXL335 setup
   pinMode(xpin, INPUT);
   pinMode(ypin, INPUT);
@@ -97,7 +121,7 @@ void loop() {
   }
   //do nothing until update is received
   if(updateReceived == 0)
-  ;
+    initDisplay(); //wait for device
   else {
     
     counter++; //loop counter for only pulse sensor and temp sensor: 40 iterations => 20 for pulse sensor, 20 for temp sensor
@@ -256,6 +280,7 @@ void loop() {
         readings += "|";
         readings += trueSteps;
         Serial.println(readings);
+        showOnOLED(tempSignals[highest], myBPM, trueSteps);
         readings = "";
         
       }
@@ -264,4 +289,80 @@ void loop() {
    
     delay(10);
   }
+}
+
+void showOnOLED(int temp, int pulseRate, long int numSteps){
+  display.clearDisplay();
+
+  display.setTextSize(1);      // Normal 1:1 pixel scale
+  display.setTextColor(SSD1306_WHITE); // Draw white text
+  display.setCursor(0, 0);     // Start at top-left corner
+  display.cp437(true);         // Use full 256 char 'Code Page 437' font
+  char* txtTemp = "Temperature: ";
+  for(int i=0; i<13; i++){
+    display.write(*(txtTemp+i));  
+  }
+  
+  display.write(temp/10 + 48); //first digit
+  display.write(temp % 10 + 48); //second digit
+  display.write((int)(' '));
+  display.write(248); //degree symbol
+  display.write((int)('C'));
+  display.write(10); //new line
+  display.write(10); //new line
+  char* txtPulseRate = "Pulse Rate: ";
+  for(int i=0; i<12; i++){
+    display.write(*(txtPulseRate+i));
+  }
+  
+  if(pulseRate/100 != 0)
+    display.write(pulseRate/100 + 48); //first digit if available
+  display.write((pulseRate % 100) / 10 + 48); //second digit
+  display.write((pulseRate % 100) % 10 + 48); //last digit
+  
+  display.write(' ');
+  display.write('B');
+  display.write('P');
+  display.write('M');
+  display.write(10); //new line
+  display.write(10); //new line
+
+  char* txtSteps = "Steps today: ";
+  for(int i=0; i<13; i++){
+    display.write(*(txtSteps + i));  
+  }
+  if(numSteps / 100000 != 0)
+    display.write(numSteps / 100000 + 48);
+  if((numSteps % 100000) / 10000 != 0)
+    display.write((numSteps % 100000) / 10000 + 48);
+  if(((numSteps % 100000) % 10000) / 1000 != 0)
+    display.write(((numSteps % 100000) % 10000) / 1000 + 48);
+  if((((numSteps % 100000) % 10000) % 1000) / 100 != 0)
+    display.write((((numSteps % 100000) % 10000) % 1000) / 100 + 48);
+  if(((((numSteps % 100000) % 10000) % 1000) % 100) / 10 != 0)
+    display.write(((((numSteps % 100000) % 10000) % 1000) % 100) / 10 + 48);
+  display.write(((((numSteps % 100000) % 10000) % 1000) % 100) % 10 + 48);
+  
+    
+  display.display();
+
+}
+
+void initDisplay(){
+  display.clearDisplay();
+
+  display.setTextSize(1);      // Normal 1:1 pixel scale
+  display.setTextColor(SSD1306_WHITE); // Draw white text
+  display.setCursor(0, 0);     // Start at top-left corner
+  display.cp437(true);         // Use full 256 char 'Code Page 437' font
+  display.write(10);
+  display.write(10);
+  display.write(10);
+  display.write(" ");
+  char* txtLoading = "Waiting for device..";
+  for(int i=0; i<22; i++){
+    display.write(*(txtLoading+i));  
+  }
+
+  display.display();
 }
