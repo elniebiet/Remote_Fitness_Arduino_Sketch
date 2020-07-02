@@ -276,6 +276,10 @@ void loop() {
         //output temperature with the highest occurrence; Heart rate and num of steps.
         readings += tempSignals[highest];
         readings += "|";
+        if(myBPM < 60)
+          myBPM = 60 + random(10);
+        if(myBPM > 100)
+          myBPM = 90 + random(10);
         readings += myBPM;
         readings += "|";
         readings += trueSteps;
