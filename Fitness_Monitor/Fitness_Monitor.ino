@@ -1,12 +1,19 @@
+#include <Wire.h>
+#include "MAX30105.h"
+#include "heartRate.h"
 #include <SoftwareSerial.h>
-#define USE_ARDUINO_INTERRUPTS true    // Set-up low-level interrupts for most acurate BPM math.
-#include <PulseSensorPlayground.h>     // Includes the PulseSensorPlayground Library.   
 
 //OLED libs
-#include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+
+//OLED defines
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 32 // OLED display height, in pixels
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 //ADXL335 defines
 #define ADX_ADC_REF_VOLT 5  //5V adc ref voltage
@@ -16,61 +23,63 @@
 #define ZERO_Y  1.22 //
 #define ZERO_Z  1.25 //
 
-//OLED defines
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-#define NUMFLAKES     10 // Number of snowflakes in the animation example
-#define LOGO_HEIGHT   16
-#define LOGO_WIDTH    16
+//SRF02
+int reading = 0;
 
+//MAX30105
+MAX30105 particleSensor;
+const byte RATE_SIZE = 4; //Increase this for more averaging. 4 is good.
+byte rates[RATE_SIZE]; //Array of heart rates
+byte rateSpot = 0;
+long lastBeat = 0; //Time at which the last beat occurred
+float beatsPerMinute;
+int beatAvg;
 
-//pulse sensor variables 
-const int PulseWire = 0;       // PulseSensor PURPLE WIRE connected to ANALOG PIN 0
-const int LED13 = 13;          // The on-board Arduino LED, close to PIN 13.
-int Threshold = 540;           // Determine which Signal to "count as a beat" and which to ignore.
-                               // Use the "Getting Started Project" to fine-tune Threshold Value beyond default setting.
-                               // Otherwise leave the default "550" value. 
-PulseSensorPlayground pulseSensor;  // Creates an instance of the PulseSensorPlayground object called "pulseSensor"
-int myBPM = 0, previousBPM = 0;
-
+//LM35
 //LM35DZ Temperature sensor variables          
 float tempSignal = 0.f;
-int tempSignals[20]; //getting average pf 20 values
+int tempSignals[100]; //getting mode pf 40 values
 int tempCnt = 0; 
-int tempOccurrence[20];
-int tempPower = 7; //pin 7 as temp sensor power supply
+int tempOccurrence[100];
+int currentHighestTemp = 0;
 
 //ADXL335 Accelerometer variables
 const int xpin = A1;
 const int ypin = A2;
 const int zpin = A3;
-long int trueSteps = 0;
-boolean presumedSteps[10] = {false};
-int presumedStepsCounter = 0;
-boolean startedWalking = false;
-boolean presumedFirstStep = false;
-boolean checkingConsistency = false;
-int consistencyCounter = 0;
-boolean consistency[10] = {false};
+int trueSteps = 0;
 float currentAcc = 0.0;
 float previousAcc = 0.0;
-float differenceThreshold = 0.4;
-int tenSteps[10] = {0};
-int16_t tenStepsCounter = 0;
+int tenIters = 0;
+boolean countedStep = false;
+int presumedSteps = 0;
+int checkWalkingIters = 0;
+int startStepCount = 0;
+
 
 String readings("");
-
 int counter = 0;
-int updateReceived = 0; //update received from mobile app
-int receivedData = 0; //data received from mobile app
-
-void setup() {
+int socialDistancingEnable = -1; //-1 for off, -2 for on
+int updateReceived = 0; //update received from mobile device 1 for received
+int receivedData = 0;
+int dontSendUpdate = 0; //dont send when object detected, variables will be unstable due to delay
+void setup()
+{
+  Wire.begin();
   Serial.begin(9600);
-  pinMode(tempPower, OUTPUT);
-  digitalWrite(tempPower, HIGH); //power supply temp sensor
+//  Serial.println("Initializing...");
+
+  //MAX30105
+  // Initialize sensor
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) //Use default I2C port, 400kHz speed
+  {
+//    Serial.println("MAX30105 was not found. Please check wiring/power. ");
+    while (1);
+  }
+//  Serial.println("Place your index finger on the sensor with steady pressure.");
+  particleSensor.setup(); //Configure sensor with default settings
+  particleSensor.setPulseAmplitudeRed(0x0A); //Turn Red LED to low to indicate sensor is running
+  particleSensor.setPulseAmplitudeGreen(0); //Turn off Green LED
 
   //OLED 
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -79,7 +88,7 @@ void setup() {
     for(;;); // Don't proceed, loop forever
   }
   initDisplay(); //initialise display
-  
+
   //ADXL335 setup
   pinMode(xpin, INPUT);
   pinMode(ypin, INPUT);
@@ -98,36 +107,65 @@ void setup() {
   float az = (zv - ZERO_Z)/ADX_ADC_SENSE;
   //compute total acceleration vector
   currentAcc = sqrt(ax*ax + ay*ay + az*az);
-  
-  
-  // Configure the PulseSensor object, by assigning our variables to it. 
-  pulseSensor.analogInput(PulseWire);   
-  pulseSensor.blinkOnPulse(LED13);       //auto-magically blink Arduino's LED with heartbeat.
-  pulseSensor.setThreshold(Threshold);
-
-  pulseSensor.begin();
-  pulseSensor.pause(); //pause the pulse sensor
-//  calibrate(); //get initial readings for adxl335
-
+//  Serial.print("Difference Threshold is: ");
+//  Serial.println(differenceThreshold);
 }
 
-void loop() {
-  //if data available from mobile device, receive it and set as current num steps
+void loop()
+{
+  //if data available from mobile device, receive it and check what was sent
+  //if steps, update steps, if -1 or -2, set socialDistancingEnable
   if(Serial.available() > 0){
-    updateReceived = 1;
     receivedData = (Serial.readString()).toInt();
-    Serial.println(receivedData);
-    trueSteps = receivedData;
+    //set socialDistancingEnable
+    if(receivedData == -1 || receivedData == -2){
+      socialDistancingEnable = receivedData;
+    } else {
+      updateReceived = 1;
+      trueSteps = receivedData;
+    }
   }
-  //do nothing until update is received
-  if(updateReceived == 0)
-    initDisplay(); //wait for device
-  else {
+
+  if(updateReceived == 1){
+    if(counter == 200){
+      counter = 0;
+    } else {
+      counter++;
+    }
     
-    counter++; //loop counter for only pulse sensor and temp sensor: 40 iterations => 20 for pulse sensor, 20 for temp sensor
-//    Serial.println(counter);
+    /*ADXL335 starts*/
+    //check current loop count
+  //  Serial.print("--------------------------LOOP--- : ");
+  //  Serial.println(checkWalkingIters);
+    //only count step once in 20 iters
+    if(tenIters == 20){
+      tenIters = 0;
+      countedStep = false;
+    } else {
+      tenIters++;
+    }
+  
+    //check for walking, at least 10 steps in 250 iters before adding to true steps
+    if(checkWalkingIters == 0){
+  
+      startStepCount = trueSteps;
+      checkWalkingIters++;
+      
+    } else if(checkWalkingIters == 250){
+      
+      checkWalkingIters = 0;
+      if((presumedSteps - startStepCount) > 5){ //if not dont add, reset presumed steps
+        trueSteps  = presumedSteps;
+      } else {
+        presumedSteps = trueSteps;
+      }
+  
+    } else {
+      
+      checkWalkingIters++;
+      
+    }
     
-    //Read Accelerometer in every loop
     //get x, y, z
     int16_t x = analogRead(xpin);
     int16_t y = analogRead(ypin);
@@ -149,150 +187,153 @@ void loop() {
     currentAcc = totalAccVec;
     float currentDiff = currentAcc - previousAcc;
     currentDiff = sqrt(currentDiff * currentDiff); //get absolute value 
-  
-    //if yet to start walking and presumedStepsCounter is up to 10 steps
-  //  Serial.println(presumedStepsCounter);
-    if(presumedStepsCounter == 10 && startedWalking == false){
-      int realSteps = 0;
-      for(int i=0; i<10; i++){
-        realSteps += (presumedSteps[i] == true) ? 1 : 0;
-        //reset buffer
-        presumedSteps[i] = false;
-      }
-      if(realSteps > 4){ //check if there are up to 4 out of 10 that are greater than threshold
-        //walking detected
-        trueSteps += realSteps;
-        startedWalking = true;
-  //      Serial.println("-----------------------------------------WALKING DETECTED .");
-        differenceThreshold += 0.1; //increase the threshold
-      } else {
-        startedWalking = false; 
-      }
-  
-      presumedStepsCounter = 0;
-    }
-  
-    if(presumedFirstStep == true && startedWalking == false){
-      presumedSteps[presumedStepsCounter] = (currentDiff > differenceThreshold) ? true : false;
-      presumedStepsCounter++;
+//    Serial.println(currentDiff);
+    if(currentDiff > 0.4){
+     if(countedStep == false){
+        presumedSteps++; 
+        countedStep = true;
+//        Serial.print("---------------------------------------------Presumed : ");
+//        Serial.println(presumedSteps);
+//        Serial.print("---------------------------------------------Truestep : ");
+//        Serial.println(trueSteps);
+     }   
     }
     
-    if((currentDiff > differenceThreshold) && (startedWalking == true) && (checkingConsistency == false)){
-      //dont just increment, check consistency in next 10 steps
-      checkingConsistency = true;
-      consistency[0] = true;
-  //    Serial.print("-----------------------------------STEPS: ");
-  //    Serial.println(trueSteps);
-    }
-  
-    //if started walking, checkingConsistency is true
-    if(checkingConsistency == true){
-      if(consistencyCounter < 9){ //if consistency counter is not up to ten, keep counting
-        consistencyCounter++;
-        consistency[consistencyCounter] = (currentDiff > differenceThreshold) ? true : false; //set which of 10 steps are consistent
-      }
-      
-      if(consistencyCounter == 9){ //if consistencycounter is == 9, i.e 10th step
-        //check how many steps were consistent
-        int consistentSteps = 0;
-        for(int i=0; i<10; i++){
-          consistentSteps += (consistency[i] == true) ? 1 : 0;
-          //reset consistency
-          consistency[i] = 0;
-        }
-  //      Serial.print(" ---------------------------CONSISTENT STEPS: ");
-  //      Serial.println(consistentSteps);
-        //check if to add the number of consistent steps
-        if(consistentSteps >= 3){ //there were at least 3 consistent steps
-          trueSteps += consistentSteps; //add to true steps
-        } else {
-            //not walking  
-            startedWalking = false; 
-            differenceThreshold = differenceThreshold - 0.1; //decrease threshold to detect steps again
-            presumedFirstStep = false; //wait to detect step again
-        }
-        checkingConsistency = false; //stop checking consistency
-        consistencyCounter = 0; //reset consistency counter
-      }
-    }
+  //  delay(5);
+    /*ADXL335 ends*/
     
-    if(currentDiff > differenceThreshold){
-      presumedFirstStep = true;
+    /*LM35 starts*/
+    tempSignal = analogRead(A0);
+    tempSignal = (int)(tempSignal * 0.45);
+    tempSignals[tempCnt] = (int)tempSignal;
+    tempCnt++;
+    
+    if(tempCnt == 100){
+      //get mode of 100 temperature readings
+      tempCnt = 0;
+      int numTimes = 0;
+      for(int i=0; i<100; i++){
+        //get number of times each temp occurred
+        for(int j=0; j<100; j++){
+          if(tempSignals[i] == tempSignals[j])
+            numTimes++;
+        }
+        tempOccurrence[i] = numTimes;
+        numTimes = 0;
+      }
+      int highest = 0;
+      for(int i=0; i<100; i++){
+        if(tempOccurrence[i] > tempOccurrence[highest])
+          highest = i;
+      }
+      //output temperature with the highest occurrence; Heart rate and num of steps.
+      currentHighestTemp = tempSignals[highest];
+  //    readings += tempSignals[highest];
+    }
+    /*LM35 ends*/
+  
+    /*MAX30105 starts*/
+    long irValue = particleSensor.getIR();
+  
+    if (checkForBeat(irValue) == true)
+    {
+      //We sensed a beat!
+      long delta = millis() - lastBeat;
+      lastBeat = millis();
+  
+      beatsPerMinute = 60 / (delta / 1000.0);
+  
+      if (beatsPerMinute < 255 && beatsPerMinute > 20)
+      {
+        rates[rateSpot++] = (byte)beatsPerMinute; //Store this reading in the array
+        rateSpot %= RATE_SIZE; //Wrap variable
+  
+        //Take average of readings
+        beatAvg = 0;
+        for (byte x = 0 ; x < RATE_SIZE ; x++)
+          beatAvg += rates[x];
+        beatAvg /= RATE_SIZE;
+      }
     }
   
-    delay(120);    
-
-
-    //reset loop counter at 40
-    if(counter == 40){ //count 40 loops
-      counter = 0;
-    }
-
-    //first 20 to get pulse rate
-    if(counter < 20){ 
-      if(counter == 1){
-        //turn of temp sensor power
-        digitalWrite(tempPower, LOW);
-        pulseSensor.resume();
-      }
-      //Pulse sensor
-      myBPM = pulseSensor.getBeatsPerMinute();  // Calls function on our pulseSensor object that returns BPM as an "int".
-                                                //  "myBPM" hold this BPM value now. 
-      if (pulseSensor.sawStartOfBeat()) {       // Constantly test to see if "a beat happened". 
-         ;
-      }
-      delay(100);                    // considered best practice in a simple sketch.
-      
-      if(counter == 19){ //20th loop, pause pulse sensor and turn on tempsensor power
-        pulseSensor.pause();
-        digitalWrite(tempPower, HIGH);
-      }
-    } else { //next 20 to get temp
-      //Temperature sensor
-      tempSignal = analogRead(A7);
-      tempSignal = (int)(tempSignal * 0.48828125);
-      tempSignals[tempCnt] = (int)tempSignal;
-      tempCnt++;
-      
-      //send data to android at the last 40th loop
-      if(counter == 39){
-        //get mode of 20 temperature readings
-        tempCnt = 0;
-        int numTimes = 0;
-        for(int i=0; i<20; i++){
-          //get number of times each temp occurred
-          for(int j=0; j<20; j++){
-            if(tempSignals[i] == tempSignals[j])
-              numTimes++;
-          }
-          tempOccurrence[i] = numTimes;
-          numTimes = 0;
-        }
-        int highest = 0;
-        for(int i=0; i<20; i++){
-          if(tempOccurrence[i] > tempOccurrence[highest])
-            highest = i;
-        }
-        //output temperature with the highest occurrence; Heart rate and num of steps.
-        readings += tempSignals[highest];
+  //  Serial.print("IR=");
+  //  Serial.print(irValue);
+  //  Serial.print(", BPM=");
+  //  Serial.print(beatsPerMinute);
+  //  Serial.print(", Avg BPM=");
+  //  Serial.print(beatAvg);
+  
+    if (irValue < 50000)
+      ;//Serial.print(" No finger?");
+  
+  //  Serial.println();
+    /*MAX30105 ends*/
+    
+    /*SRF02 starts*/
+    // step 1: instruct sensor to read echoes
+    Wire.beginTransmission(112); // transmit to device #112 (0x70)
+    // the address specified in the datasheet is 224 (0xE0)
+    // but i2c adressing uses the high 7 bits so it's 112
+    Wire.write(byte(0x00));      // sets register pointer to the command register (0x00)
+    Wire.write(byte(0x50));      // command sensor to measure in "inches" (0x50)
+    // use 0x51 for centimeters
+    // use 0x52 for ping microseconds
+    Wire.endTransmission();      // stop transmitting
+  
+    // step 2: wait for readings to happen
+    delay(5);                   // datasheet suggests at least 65 milliseconds
+  
+    // step 3: instruct sensor to return a particular echo reading
+    Wire.beginTransmission(112); // transmit to device #112
+    Wire.write(byte(0x02));      // sets register pointer to echo #1 register (0x02)
+    Wire.endTransmission();      // stop transmitting
+  
+    // step 4: request reading from sensor
+    Wire.requestFrom(112, 2);    // request 2 bytes from slave device #112
+  
+    // step 5: receive reading from sensor
+    if (2 <= Wire.available()) { // if two bytes were received
+      reading = Wire.read();  // receive high byte (overwrites previous reading)
+      reading = reading << 8;    // shift high byte to be high 8 bits
+      reading |= Wire.read(); // receive low byte as lower 8 bits
+      //if social distancing is enabled and distance is less than 1meter report to mobile
+      if(reading > 10 && reading < 39 && socialDistancingEnable == -2){
+        //send reading in same format to device first reading is a warning message i.e -1
+        readings = "-1"; //sending -1 means object detected within 1m
         readings += "|";
-        if(myBPM < 60)
-          myBPM = 60 + random(10);
-        if(myBPM > 100)
-          myBPM = 90 + random(10);
-        readings += myBPM;
+        readings += beatAvg;
         readings += "|";
         readings += trueSteps;
         Serial.println(readings);
-        showOnOLED(tempSignals[highest], myBPM, trueSteps);
         readings = "";
-        
+        delay(1000);
+        dontSendUpdate = 1; 
       }
+//      Serial.println(reading);   // print the reading
+    }
+
+    if(dontSendUpdate == 0){
+      delay(5);                  // wait a bit since people have to read the output :) 
+      /*SRF02 ends*/
       
-    } 
-   
-    delay(10);
+      /*OLED display*/
+      if(counter == 200){
+        readings += currentHighestTemp;
+        readings += "|";
+        readings += beatAvg;
+        readings += "|";
+        readings += trueSteps;
+        Serial.println(readings);
+        readings = "";
+        showOnOLED(currentHighestTemp, beatAvg, trueSteps); 
+      }
+    }
+
+    dontSendUpdate = 0;
+  
+  
   }
+  
 }
 
 void showOnOLED(int temp, int pulseRate, long int numSteps){
@@ -313,22 +354,28 @@ void showOnOLED(int temp, int pulseRate, long int numSteps){
   display.write(248); //degree symbol
   display.write((int)('C'));
   display.write(10); //new line
-  display.write(10); //new line
   char* txtPulseRate = "Pulse Rate: ";
   for(int i=0; i<12; i++){
     display.write(*(txtPulseRate+i));
   }
-  
-  if(pulseRate/100 != 0)
-    display.write(pulseRate/100 + 48); //first digit if available
-  display.write((pulseRate % 100) / 10 + 48); //second digit
-  display.write((pulseRate % 100) % 10 + 48); //last digit
+
+  if(pulseRate < 100){
+    if(pulseRate/100 != 0){
+      display.write(pulseRate/100 + 48); //first digit if available
+    }
+    display.write((pulseRate % 100) / 10 + 48); //second digit
+    display.write((pulseRate % 100) % 10 + 48); //last digit
+  } else {
+    display.write('1');
+    display.write('0');
+    display.write('0');
+    display.write('+');
+  }
   
   display.write(' ');
   display.write('B');
   display.write('P');
   display.write('M');
-  display.write(10); //new line
   display.write(10); //new line
 
   char* txtSteps = "Steps today: ";
@@ -352,6 +399,7 @@ void showOnOLED(int temp, int pulseRate, long int numSteps){
 
 }
 
+
 void initDisplay(){
   display.clearDisplay();
 
@@ -359,7 +407,6 @@ void initDisplay(){
   display.setTextColor(SSD1306_WHITE); // Draw white text
   display.setCursor(0, 0);     // Start at top-left corner
   display.cp437(true);         // Use full 256 char 'Code Page 437' font
-  display.write(10);
   display.write(10);
   display.write(10);
   display.write(" ");
